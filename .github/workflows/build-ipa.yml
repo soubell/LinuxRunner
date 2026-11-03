@@ -76,7 +76,17 @@ jobs:
           fetch https://gitlab.freedesktop.org/virgl/virglrenderer.git "$GPU_DEPS/virglrenderer" "$VIRGL_REV"
           fetch https://github.com/anholt/libepoxy.git "$GPU_DEPS/libepoxy" "$EPOXY_REV"
           export PATH="$GPU_DEPS/depot_tools:$PATH"
-          (cd "$GPU_DEPS/angle" && python3 scripts/bootstrap.py && gclient sync --no-history)
+          (cd "$GPU_DEPS/angle" && python3 scripts/bootstrap.py)
+          # gclient fetches dozens of pinned repos; individual ones fail with
+          # transient HTTP 500s often enough to be worth retrying.
+          for attempt in 1 2 3 4; do
+            if (cd "$GPU_DEPS/angle" && gclient sync --no-history --reset --force); then
+              break
+            fi
+            echo "gclient sync attempt $attempt failed; retrying"
+            sleep $((attempt * 20))
+            if [ "$attempt" = 4 ]; then exit 1; fi
+          done
           scripts/build-gpu-deps.sh iphoneos
 
       - name: Build unsigned IPA
