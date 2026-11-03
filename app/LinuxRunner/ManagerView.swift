@@ -1912,8 +1912,18 @@ private struct NoticesView: View {
 }
 
 private struct TerminalSettingsView: View {
+    // Fonts the terminal can actually render; anything else falls back to the
+    // first entry. Keep in step with FontPickerViewController.
+    private static let knownFamilies = [
+        "JetBrainsMono Nerd Font Mono",
+        "FiraCode Nerd Font Mono",
+        "ui-monospace",
+        "Menlo",
+        "Monaco",
+    ]
     private let prefs = UserPreferences.shared()
     @State private var fontSize = 12.0
+    @State private var fontFamily = ""
     @State private var cursor = 0
     @State private var blink = true
     @State private var scheme = 0
@@ -1925,6 +1935,14 @@ private struct TerminalSettingsView: View {
     var body: some View {
         Form {
             Section("Appearance") {
+                Picker("Font", selection: $fontFamily) {
+                    Text("JetBrains Mono NF").tag("JetBrainsMono Nerd Font Mono")
+                    Text("FiraCode NF").tag("FiraCode Nerd Font Mono")
+                    Text("System Monospace").tag("ui-monospace")
+                    Text("Menlo").tag("Menlo")
+                    Text("Monaco").tag("Monaco")
+                }
+                .onChange(of: fontFamily) { if !$0.isEmpty { prefs.fontFamily = $0 } }
                 Stepper(value: $fontSize, in: 8...32, step: 1) { HStack { Text("Font Size"); Spacer(); Text("\(Int(fontSize)) pt").foregroundStyle(.secondary) } }
                     .onChange(of: fontSize) { prefs.fontSize = NSNumber(value: $0) }
                 Picker("Cursor", selection: $cursor) { Text("Block").tag(0); Text("Bar").tag(1); Text("Underline").tag(2) }
@@ -1945,6 +1963,7 @@ private struct TerminalSettingsView: View {
         .navigationTitle("Terminal & Keyboard")
         .onAppear {
             fontSize = prefs.fontSize.doubleValue; cursor = prefs.cursorStyle.rawValue; blink = prefs.blinkCursor; scheme = prefs.colorScheme.rawValue
+            fontFamily = Self.knownFamilies.contains(prefs.fontFamily) ? prefs.fontFamily : Self.knownFamilies[0]
             capsLock = prefs.capsLockMapping.rawValue; optionEscape = prefs.optionMapping == OptionMapEsc; backtickEscape = prefs.backtickMapEscape
             controlSpace = prefs.overrideControlSpace; hideExtraKeys = prefs.hideExtraKeysWithExternalKeyboard
         }
