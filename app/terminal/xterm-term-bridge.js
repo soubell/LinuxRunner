@@ -265,7 +265,7 @@
         // on the alternate screen. There is no scrollback there, so a drag has
         // to be turned into input the application understands: cursor keys, one
         // per line of finger travel.
-        scrollGesture(deltaY) {
+        scrollGesture(deltaY, x, y) {
             if (!Number.isFinite(deltaY) || deltaY === 0)
                 return;
             const cellHeight = getCellSize().height;
@@ -284,6 +284,13 @@
                 scheduleScrollSync();
                 return;
             }
+            // A drag on the alternate screen has no scrollback to move, so it
+            // becomes input. Applications that track the mouse get real wheel
+            // reports and scroll themselves; only those that ignore the mouse
+            // fall back to cursor keys.
+            const tracking = term.modes?.mouseTrackingMode;
+            if (tracking && tracking !== 'none' && sendWheelReports(lines, x, y))
+                return;
             const prefix = term.modes?.applicationCursorKeysMode ? '\x1bO' : '\x1b[';
             const key = prefix + (lines > 0 ? 'A' : 'B');
             native.sendInput(key.repeat(Math.abs(lines)));
@@ -345,6 +352,52 @@
             col: Math.max(0, Math.min(term.cols - 1, Math.floor((x - rect.left) / cell.width))),
             row: term.buffer.active.viewportY + Math.max(0, Math.min(term.rows - 1, Math.floor((y - rect.top) / cell.height))),
         };
+    }
+
+    // Screen cell (1-based) under a point, for mouse reports.
+    function screenCellAt(x, y) {
+        const cell = selectionCell(x, y);
+        if (!cell)
+            return null;
+        return {
+            col: cell.col + 1,
+            row: cell.row - term.buffer.active.viewportY + 1,
+        };
+    }
+
+    // Which mouse report encoding the application asked for with DECSET.
+    function mouseEncoding() {
+        const encoding = term._core?.coreMouseService?._activeEncoding;
+        if (encoding === 'SGR' || encoding === 'SGR_PIXELS')
+            return 'sgr';
+        if (encoding === 'URXVT')
+            return 'urxvt';
+        return 'x10';
+    }
+
+    // Wheel reports, the way hterm (and therefore Blink Shell) answers a wheel
+    // while the application tracks the mouse.
+    function sendWheelReports(lines, x, y) {
+        const cell = screenCellAt(x, y);
+        if (!cell)
+            return false;
+        const encoding = mouseEncoding();
+        const button = lines > 0 ? 64 : 65;
+        const count = Math.min(Math.abs(lines), 10);
+        let reports = '';
+        for (let i = 0; i < count; i++) {
+            if (encoding === 'sgr') {
+                reports += `\x1b[<${button};${cell.col};${cell.row}M`;
+            } else if (encoding === 'urxvt') {
+                reports += `\x1b[${button + 32};${cell.col};${cell.row}M`;
+            } else {
+                reports += '\x1b[M' + String.fromCharCode(button + 32) +
+                    String.fromCharCode(32 + Math.min(cell.col, 223)) +
+                    String.fromCharCode(32 + Math.min(cell.row, 223));
+            }
+        }
+        native.sendInput(reports);
+        return true;
     }
 
     function wordRangeAt(col, row) {

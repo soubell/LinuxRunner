@@ -49,6 +49,8 @@ struct rowcol {
 // Alternate screen scroll coalescing: a drag there becomes cursor keys, so the
 // deltas are summed and handed to the page once per runloop turn.
 @property (nonatomic) CGFloat pendingScrollGestureDelta;
+// Where the finger is, so the page can report a wheel at that cell.
+@property (nonatomic) CGPoint pendingScrollGesturePoint;
 @property (nonatomic) BOOL scrollGestureFlushScheduled;
 // Selection handles: after a long press picks a word, these let the range be
 // adjusted with the finger lifted, which is what makes copying practical.
@@ -462,7 +464,8 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
                 // Nothing to scroll: the alternate screen keeps no scrollback.
                 // Feed the drag to the application as cursor keys instead, the
                 // way a terminal's wheel is expected to work inside a TUI.
-                [self sendScrollGesture:translation.y - self.scrollPanLastTranslation];
+                [self sendScrollGesture:translation.y - self.scrollPanLastTranslation
+                               atPoint:[pan locationInView:self.terminal.webView]];
                 self.scrollPanLastTranslation = translation.y;
                 break;
             }
@@ -489,20 +492,23 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     }
 }
 
-- (void)sendScrollGesture:(CGFloat)delta {
+- (void)sendScrollGesture:(CGFloat)delta atPoint:(CGPoint)point {
     if (!isfinite(delta) || delta == 0)
         return;
     self.pendingScrollGestureDelta += delta;
+    self.pendingScrollGesturePoint = point;
     if (self.scrollGestureFlushScheduled)
         return;
     self.scrollGestureFlushScheduled = YES;
     dispatch_async(dispatch_get_main_queue(), ^{
         self.scrollGestureFlushScheduled = NO;
         CGFloat pending = self.pendingScrollGestureDelta;
+        CGPoint location = self.pendingScrollGesturePoint;
         self.pendingScrollGestureDelta = 0;
         if (pending == 0)
             return;
-        [self callBridge:@"return exports.scrollGesture(deltaY);" arguments:@{@"deltaY": @(pending)}];
+        [self callBridge:@"return exports.scrollGesture(deltaY, x, y);"
+               arguments:@{@"deltaY": @(pending), @"x": @(location.x), @"y": @(location.y)}];
     });
 }
 
