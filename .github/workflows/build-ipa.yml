@@ -58,6 +58,13 @@ jobs:
           path: build/gpu/iphoneos
           key: gpu-iphoneos-angle-${{ env.ANGLE_REV }}-virgl-${{ env.VIRGL_REV }}-epoxy-${{ env.EPOXY_REV }}
 
+      - name: Restore ANGLE build output
+        if: inputs.metal && steps.gpu-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gpu-deps/angle/out
+          key: angle-out-${{ env.ANGLE_REV }}
+
       - name: Build GPU dependencies (Metal)
         if: inputs.metal && steps.gpu-cache.outputs.cache-hit != 'true'
         env:
@@ -101,7 +108,8 @@ jobs:
             sleep $((attempt * 20))
             if [ "$attempt" = 4 ]; then exit 1; fi
           done
-          scripts/build-gpu-deps.sh iphoneos
+          df -h /
+          bash -x scripts/build-gpu-deps.sh iphoneos
 
       - name: Build unsigned IPA
         env:
