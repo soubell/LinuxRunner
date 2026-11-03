@@ -43,6 +43,9 @@ jobs:
         run: |
           # scripts/bootstrap-macos.sh requires: meson ninja cmake ld.lld
           brew install meson ninja cmake pkg-config lld
+          # virglrenderer's meson needs PyYAML.
+          brew install pyyaml || python3 -m pip install --user --break-system-packages pyyaml
+          python3 -c 'import yaml; print("pyyaml", yaml.__version__)'
           echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
           echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
           xcodebuild -version
