@@ -109,6 +109,9 @@ jobs:
             if [ "$attempt" = 4 ]; then exit 1; fi
           done
           df -h /
+          # The script discards stdout on the virglrenderer configure step, and
+          # meson reports failures on stdout, so the reason was invisible.
+          sed -i '' 's|-Dplatforms=egl -Dvenus=false -Dvideo=false -Dtests=false >/dev/null|-Dplatforms=egl -Dvenus=false -Dvideo=false -Dtests=false|' scripts/build-gpu-deps.sh
           # Capture everything: a failing meson setup printed nothing useful.
           set +e
           bash -x scripts/build-gpu-deps.sh iphoneos > "$RUNNER_TEMP/gpu-build.log" 2>&1
