@@ -36,6 +36,7 @@ typedef struct linux_tty *tty_t;
 
 @property DelayedUITask *refreshTask;
 @property BOOL applicationCursor;
+@property BOOL alternateScreen;
 @property (nonatomic) NSUInteger windowSizeRequestID;
 @property (nonatomic) int lastWindowCols;
 @property (nonatomic) int lastWindowRows;
@@ -210,6 +211,8 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
         NSString *property = body[0];
         if ([property isEqualToString:@"applicationCursor"] && [body[1] isKindOfClass:NSNumber.class])
             self.applicationCursor = [body[1] boolValue];
+        else if ([property isEqualToString:@"alternateScreen"] && [body[1] isKindOfClass:NSNumber.class])
+            self.alternateScreen = [body[1] boolValue];
     }
 }
 

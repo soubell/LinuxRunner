@@ -66,6 +66,9 @@ extern NSString *const kThemeBackgroundColor;
 @property CursorStyle cursorStyle;
 @property (readonly) NSString *htermCursorShape;
 @property BOOL blinkCursor;
+/// Word selection: a long press picks the word under the finger and the range
+/// can then be adjusted with drag handles.
+@property BOOL wordSelection;
 @property (readonly) UIStatusBarStyle statusBarStyle;
 @property NSArray<NSString *> *launchCommand;
 @property NSArray<NSString *> *bootCommand;

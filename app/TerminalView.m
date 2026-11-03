@@ -43,8 +43,17 @@ struct rowcol {
 @property (nonatomic) BOOL updatingTerminalScroll;
 @property (nonatomic) UIPanGestureRecognizer *scrollPanRecognizer;
 @property (nonatomic) CGFloat scrollPanStartOffset;
+@property (nonatomic) CGFloat scrollPanLastTranslation;
 @property (nonatomic) CGFloat scrollDecelerationVelocity;
 @property (nonatomic) CADisplayLink *scrollDecelerationLink;
+// Alternate screen scroll coalescing: a drag there becomes cursor keys, so the
+// deltas are summed and handed to the page once per runloop turn.
+@property (nonatomic) CGFloat pendingScrollGestureDelta;
+@property (nonatomic) BOOL scrollGestureFlushScheduled;
+// Selection handles: after a long press picks a word, these let the range be
+// adjusted with the finger lifted, which is what makes copying practical.
+@property (nonatomic) UIView *selectionStartHandle;
+@property (nonatomic) UIView *selectionEndHandle;
 // Scroll coalescing: UIScrollView can fire -scrollViewDidScroll several times
 // per frame, and each call used to cost a full JS evaluation with a formatted
 // string. Keep the newest offset and flush it once per runloop turn instead.
@@ -104,6 +113,7 @@ struct rowcol {
         self.terminalEditMenu = [[UIEditMenuInteraction alloc] initWithDelegate:self];
         [self addInteraction:self.terminalEditMenu];
     }
+    [self installSelectionHandles];
 #endif
 
     UserPreferences *prefs = UserPreferences.shared;
@@ -113,7 +123,7 @@ struct rowcol {
             self->_keyCommands = nil;
         });
     }];
-    [prefs observe:@[@"colorScheme", @"fontFamily", @"fontSize", @"theme", @"cursorStyle", @"blinkCursor"]
+    [prefs observe:@[@"colorScheme", @"fontFamily", @"fontSize", @"theme", @"cursorStyle", @"blinkCursor", @"wordSelection"]
            options:0 owner:self usingBlock:^(typeof(self) self) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self _updateStyle];
@@ -164,7 +174,7 @@ struct rowcol {
     }
 }
 
-static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight", @"newScrollTop", @"openLink", @"selectionChanged"};
+static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight", @"newScrollTop", @"openLink", @"selectionChanged", @"selectionEndpoints"};
 
 - (void)setTerminal:(Terminal *)terminal {
     if (_terminal) {
@@ -250,6 +260,7 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
         @"backgroundColor": palette.backgroundColor,
         @"cursorColor": palette.cursorColor ?: palette.foregroundColor,
         @"blinkCursor": @(prefs.blinkCursor),
+        @"wordSelection": @(prefs.wordSelection),
         @"cursorShape": prefs.htermCursorShape,
     } mutableCopy];
     if (palette.colorPaletteOverrides) {
@@ -386,6 +397,8 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     } else if ([message.name isEqualToString:@"selectionChanged"]) {
         if ([message.body isKindOfClass:NSString.class])
             self.selectedText = message.body;
+    } else if ([message.name isEqualToString:@"selectionEndpoints"]) {
+        [self updateSelectionHandlesWithEndpoints:message.body];
     }
 }
 
@@ -439,11 +452,22 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     switch (pan.state) {
         case UIGestureRecognizerStateBegan:
             [self stopScrollDeceleration];
+            [self hideSelectionHandles];
             self.scrollPanStartOffset = scrollView.contentOffset.y;
+            self.scrollPanLastTranslation = 0;
             break;
         case UIGestureRecognizerStateChanged: {
+            CGPoint translation = [pan translationInView:self];
+            if (self.terminal.alternateScreen) {
+                // Nothing to scroll: the alternate screen keeps no scrollback.
+                // Feed the drag to the application as cursor keys instead, the
+                // way a terminal's wheel is expected to work inside a TUI.
+                [self sendScrollGesture:translation.y - self.scrollPanLastTranslation];
+                self.scrollPanLastTranslation = translation.y;
+                break;
+            }
             CGFloat maxOffset = [self maximumScrollOffset];
-            CGFloat offset = self.scrollPanStartOffset - [pan translationInView:self].y;
+            CGFloat offset = self.scrollPanStartOffset - translation.y;
             offset = MAX(0, MIN(maxOffset, offset));
             if (scrollView.contentOffset.y != offset)
                 scrollView.contentOffset = CGPointMake(0, offset);
@@ -452,11 +476,46 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
         case UIGestureRecognizerStateEnded:
         case UIGestureRecognizerStateCancelled:
         case UIGestureRecognizerStateFailed:
+            // Momentum would keep pushing keys into the application after the
+            // finger is gone, so the alternate screen stops dead.
+            if (self.terminal.alternateScreen) {
+                self.scrollPanLastTranslation = 0;
+                break;
+            }
             [self startScrollDecelerationWithVelocity:-[pan velocityInView:self].y];
             break;
         default:
             break;
     }
+}
+
+- (void)sendScrollGesture:(CGFloat)delta {
+    if (!isfinite(delta) || delta == 0)
+        return;
+    self.pendingScrollGestureDelta += delta;
+    if (self.scrollGestureFlushScheduled)
+        return;
+    self.scrollGestureFlushScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.scrollGestureFlushScheduled = NO;
+        CGFloat pending = self.pendingScrollGestureDelta;
+        self.pendingScrollGestureDelta = 0;
+        if (pending == 0)
+            return;
+        [self callBridge:@"return exports.scrollGesture(deltaY);" arguments:@{@"deltaY": @(pending)}];
+    });
+}
+
+// Runs a statement body in the page with the given values bound as variables.
+- (void)callBridge:(NSString *)body arguments:(NSDictionary<NSString *, id> *)arguments {
+    WKWebView *webView = self.terminal.webView;
+    if (webView == nil)
+        return;
+    [webView callAsyncJavaScript:body
+                       arguments:arguments
+                         inFrame:nil
+                  inContentWorld:WKContentWorld.pageWorld
+               completionHandler:nil];
 }
 
 - (void)startScrollDecelerationWithVelocity:(CGFloat)velocity {
@@ -605,9 +664,17 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
 
 - (void)copy:(id)sender {
     [self.terminal.webView evaluateJavaScript:@"exports.copy()" completionHandler:^(id result, NSError *error) {
-        if (error == nil && [result isKindOfClass:NSString.class] && [result length] > 0)
+        if (error == nil && [result isKindOfClass:NSString.class] && [result length] > 0) {
             UIPasteboard.generalPasteboard.string = result;
+            [self clearTerminalSelection];
+        }
     }];
+}
+
+- (void)clearTerminalSelection {
+    self.selectedText = nil;
+    [self hideSelectionHandles];
+    [self callBridge:@"exports.clearSelection?.();" arguments:@{}];
 }
 
 - (BOOL)canPerformAction:(SEL)action withSender:(id)sender {
@@ -630,20 +697,130 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
     CGPoint point = [gesture locationInView:self.terminal.webView];
     if (gesture.state == UIGestureRecognizerStateBegan || gesture.state == UIGestureRecognizerStateChanged) {
         self.scrollbarView.scrollEnabled = NO;
-        NSString *method = gesture.state == UIGestureRecognizerStateBegan ? @"beginSelection" : @"extendSelection";
-        NSString *script = [NSString stringWithFormat:@"exports.%@(%f,%f)", method, point.x, point.y];
-        [self.terminal.webView evaluateJavaScript:script completionHandler:nil];
+        if (gesture.state == UIGestureRecognizerStateBegan) {
+            [self callBridge:@"exports.beginSelection(x, y);" arguments:@{@"x": @(point.x), @"y": @(point.y)}];
+        } else {
+            [self callBridge:@"exports.extendSelection(x, y);" arguments:@{@"x": @(point.x), @"y": @(point.y)}];
+        }
     } else if (gesture.state == UIGestureRecognizerStateEnded) {
         self.scrollbarView.scrollEnabled = YES;
-        [self becomeFirstResponder];
-        CGPoint anchor = [gesture locationInView:self];
-        if (@available(iOS 16.0, *)) {
-            [self.terminalEditMenu presentEditMenuWithConfiguration:[UIEditMenuConfiguration configurationWithIdentifier:nil sourcePoint:anchor]];
-        } else {
-            [UIMenuController.sharedMenuController showMenuFromView:self rect:CGRectMake(anchor.x, anchor.y, 1, 1)];
-        }
+        // The page reports the selection endpoints, which brings up the drag
+        // handles; without a selection there is nothing to offer.
+        if (self.selectedText.length > 0)
+            [self presentTerminalEditMenuAtPoint:[gesture locationInView:self]];
+        else
+            [self becomeFirstResponder];
     } else if (gesture.state == UIGestureRecognizerStateCancelled || gesture.state == UIGestureRecognizerStateFailed) {
         self.scrollbarView.scrollEnabled = YES;
+        [self hideSelectionHandles];
+    }
+}
+
+- (void)presentTerminalEditMenuAtPoint:(CGPoint)point {
+    [self becomeFirstResponder];
+    if (@available(iOS 16.0, *)) {
+        [self.terminalEditMenu presentEditMenuWithConfiguration:[UIEditMenuConfiguration configurationWithIdentifier:nil sourcePoint:point]];
+    } else {
+        [UIMenuController.sharedMenuController showMenuFromView:self rect:CGRectMake(point.x, point.y, 1, 1)];
+    }
+}
+
+#pragma mark Selection handles
+
+static const CGFloat SelectionHandleSize = 44;
+static const CGFloat SelectionHandleDotSize = 22;
+
+- (void)installSelectionHandles {
+    self.selectionStartHandle = [self newSelectionHandle];
+    self.selectionEndHandle = [self newSelectionHandle];
+    // The scroll view moves its subviews by shifting its bounds, so a handle
+    // parked inside it would drift with the scrollback. Keep them here instead,
+    // above the scroll view, where their frames mean what they say.
+    [self addSubview:self.selectionStartHandle];
+    [self addSubview:self.selectionEndHandle];
+}
+
+- (UIView *)newSelectionHandle {
+    UIView *handle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, SelectionHandleSize, SelectionHandleSize)];
+    handle.hidden = YES;
+    handle.isAccessibilityElement = NO;
+    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake((SelectionHandleSize - SelectionHandleDotSize) / 2,
+                                                          (SelectionHandleSize - SelectionHandleDotSize) / 2,
+                                                          SelectionHandleDotSize, SelectionHandleDotSize)];
+    dot.userInteractionEnabled = NO;
+    dot.backgroundColor = UIColor.systemBlueColor;
+    dot.layer.cornerRadius = SelectionHandleDotSize / 2;
+    dot.layer.borderWidth = 2;
+    dot.layer.borderColor = UIColor.whiteColor.CGColor;
+    [handle addSubview:dot];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleSelectionHandlePan:)];
+    pan.maximumNumberOfTouches = 1;
+    [handle addGestureRecognizer:pan];
+    return handle;
+}
+
+- (void)hideSelectionHandles {
+    self.selectionStartHandle.hidden = YES;
+    self.selectionEndHandle.hidden = YES;
+}
+
+- (void)updateSelectionHandlesWithEndpoints:(id)body {
+    if (![body isKindOfClass:NSArray.class] || [body count] < 6) {
+        [self hideSelectionHandles];
+        return;
+    }
+    NSArray *values = body;
+    WKWebView *webView = self.terminal.webView;
+    for (id value in values) {
+        if (![value isKindOfClass:NSNumber.class] || webView == nil) {
+            [self hideSelectionHandles];
+            return;
+        }
+    }
+    CGPoint start = [self convertPoint:CGPointMake([values[0] doubleValue], [values[1] doubleValue])
+                              fromView:webView];
+    CGPoint end = [self convertPoint:CGPointMake([values[2] doubleValue], [values[3] doubleValue])
+                            fromView:webView];
+    // Keep the whole handle inside the view so it stays grabbable on the first
+    // and last row.
+    CGFloat inset = SelectionHandleSize / 2;
+    CGRect limits = self.bounds;
+    start.x = MAX(inset, MIN(CGRectGetMaxX(limits) - inset, start.x));
+    start.y = MAX(inset, MIN(CGRectGetMaxY(limits) - inset, start.y));
+    end.x = MAX(inset, MIN(CGRectGetMaxX(limits) - inset, end.x));
+    end.y = MAX(inset, MIN(CGRectGetMaxY(limits) - inset, end.y));
+    self.selectionStartHandle.center = start;
+    self.selectionEndHandle.center = end;
+    self.selectionStartHandle.hidden = ![values[4] boolValue];
+    self.selectionEndHandle.hidden = ![values[5] boolValue];
+}
+
+- (void)handleSelectionHandlePan:(UIPanGestureRecognizer *)pan {
+    if (!self.terminal.loaded)
+        return;
+    BOOL isStart = pan.view == self.selectionStartHandle;
+    CGPoint point = [pan locationInView:self.terminal.webView];
+    switch (pan.state) {
+        case UIGestureRecognizerStateBegan:
+            // Stop the scroll pan from chasing the same finger.
+            self.scrollbarView.scrollEnabled = NO;
+            [self stopScrollDeceleration];
+            [self callBridge:@"exports.beginHandleDrag(which);"
+                   arguments:@{@"which": isStart ? @"start" : @"end"}];
+            break;
+        case UIGestureRecognizerStateChanged:
+            [self callBridge:@"exports.setSelectionEndpoint(x, y);"
+                   arguments:@{@"x": @(point.x), @"y": @(point.y)}];
+            break;
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed:
+            self.scrollbarView.scrollEnabled = YES;
+            if (pan.state == UIGestureRecognizerStateEnded && self.selectedText.length > 0)
+                [self presentTerminalEditMenuAtPoint:[pan locationInView:self]];
+            break;
+        default:
+            break;
     }
 }
 
@@ -795,6 +972,9 @@ static const char *metaKeys = "abcdefghijklmnopqrstuvwxyz0123456789-=[]\\;',./";
     if (UserPreferences.shared.backtickMapEscape) {
         [self addKey:@"`" withModifiers:0];
     }
+    [_keyCommands addObject:[UIKeyCommand keyCommandWithInput:@"c"
+                                                modifierFlags:UIKeyModifierCommand
+                                                       action:@selector(copy:)]];
     [_keyCommands addObject:[UIKeyCommand keyCommandWithInput:@"k"
                                                 modifierFlags:UIKeyModifierCommand|UIKeyModifierShift
                                                        action:@selector(clearScrollback:)

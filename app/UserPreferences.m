@@ -24,6 +24,7 @@ NSString *const kPreferenceLaunchCommandKey = @"Init Command";
 NSString *const kPreferenceBootCommandKey = @"Boot Command";
 static NSString *const kPreferenceCursorStyleKey = @"Cursor Style";
 static NSString *const kPreferenceBlinkCursorKey = @"Blink Cursor";
+static NSString *const kPreferenceWordSelectionKey = @"Word Selection";
 NSString *const kPreferenceHideStatusBarKey = @"Status Bar";
 static NSString *const kPreferenceColorSchemeKey = @"Color Scheme";
 // This key has a different naming scheme because it's used in UI tests as a
@@ -168,6 +169,7 @@ bool (*remove_user_default)(const char *name);
             kPreferenceLaunchCommandKey: @[@"/bin/login", @"-f", @"root"],
             kPreferenceBootCommandKey: @[@"/sbin/init"],
             kPreferenceBlinkCursorKey: @(NO),
+            kPreferenceWordSelectionKey: @(YES),
             kPreferenceCursorStyleKey: @(CursorStyleBlock),
             kPreferenceHideStatusBarKey: @(NO),
             kPreferenceColorSchemeKey: @(ColorSchemeMatchSystem),
@@ -196,6 +198,7 @@ bool (*remove_user_default)(const char *name);
             @"boot_command": kPreferenceBootCommandKey,
             @"cursor_style": kPreferenceCursorStyleKey,
             @"blink_cursor": kPreferenceBlinkCursorKey,
+            @"word_selection": kPreferenceWordSelectionKey,
             @"hide_status_bar": kPreferenceHideStatusBarKey,
             @"color_scheme": kPreferenceColorSchemeKey,
             @"theme": kPreferenceThemeKey,
@@ -221,6 +224,7 @@ bool (*remove_user_default)(const char *name);
             kPreferenceBootCommandKey: property(bootCommand),
             kPreferenceCursorStyleKey: property(cursorStyle),
             kPreferenceBlinkCursorKey: property(blinkCursor),
+            kPreferenceWordSelectionKey: property(wordSelection),
             kPreferenceHideStatusBarKey: property(hideStatusBar),
             kPreferenceColorSchemeKey: property(colorScheme),
             // This one is a little bit special, so it needs extra handling.
@@ -548,6 +552,16 @@ bool (*remove_user_default)(const char *name);
 
 - (BOOL)validateBlinkCursor:(id *)value error:(NSError **)error {
     return [*value isKindOfClass:NSNumber.class];
+}
+
+// MARK: wordSelection
+
+- (BOOL)wordSelection {
+    return [_defaults boolForKey:kPreferenceWordSelectionKey];
+}
+
+- (void)setWordSelection:(BOOL)wordSelection {
+    [_defaults setBool:wordSelection forKey:kPreferenceWordSelectionKey];
 }
 
 // MARK: hideStatusBar

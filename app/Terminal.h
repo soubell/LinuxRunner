@@ -37,6 +37,9 @@ struct tty;
 @property (readonly) WKWebView *webView;
 @property (nonatomic, copy) NSString *bootstrapStyleJSON;
 @property (nonatomic) BOOL enableVoiceOverAnnounce;
+/// YES while the application is on the alternate screen: there is no
+/// scrollback to drag, so gestures have to become input instead.
+@property (readonly) BOOL alternateScreen;
 // Use KVO on this
 @property (readonly) BOOL loaded;
 

@@ -1926,6 +1926,7 @@ private struct TerminalSettingsView: View {
     @State private var fontFamily = ""
     @State private var cursor = 0
     @State private var blink = true
+    @State private var wordSelection = true
     @State private var scheme = 0
     @State private var capsLock = 0
     @State private var optionEscape = false
@@ -1959,6 +1960,9 @@ private struct TerminalSettingsView: View {
                 Toggle("Ctrl-Space Goes to Linux", isOn: $controlSpace).onChange(of: controlSpace) { prefs.overrideControlSpace = $0 }
                 Toggle("Hide Extra Keys with Hardware Keyboard", isOn: $hideExtraKeys).onChange(of: hideExtraKeys) { prefs.hideExtraKeysWithExternalKeyboard = $0 }
             } header: { Text("Keyboard") } footer: { Text("The terminal's key bar provides Esc, Tab, Ctrl, Alt and arrow keys on screen. Changes apply to open terminals.") }
+            Section {
+                Toggle("Select Word on Long Press", isOn: $wordSelection).onChange(of: wordSelection) { prefs.wordSelection = $0 }
+            } header: { Text("Selection") } footer: { Text("A long press picks the word under your finger and leaves a handle on each end of the range to drag into shape before copying.") }
         }
         .navigationTitle("Terminal & Keyboard")
         .onAppear {
@@ -1966,6 +1970,7 @@ private struct TerminalSettingsView: View {
             fontFamily = Self.knownFamilies.contains(prefs.fontFamily) ? prefs.fontFamily : Self.knownFamilies[0]
             capsLock = prefs.capsLockMapping.rawValue; optionEscape = prefs.optionMapping == OptionMapEsc; backtickEscape = prefs.backtickMapEscape
             controlSpace = prefs.overrideControlSpace; hideExtraKeys = prefs.hideExtraKeysWithExternalKeyboard
+            wordSelection = prefs.wordSelection
         }
     }
 }
