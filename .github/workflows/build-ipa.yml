@@ -76,6 +76,20 @@ jobs:
           fetch https://gitlab.freedesktop.org/virgl/virglrenderer.git "$GPU_DEPS/virglrenderer" "$VIRGL_REV"
           fetch https://github.com/anholt/libepoxy.git "$GPU_DEPS/libepoxy" "$EPOXY_REV"
           export PATH="$GPU_DEPS/depot_tools:$PATH"
+          # chromium.googlesource.com answers HTTP 500 for this pinned repo on
+          # every attempt. It is a formatting helper, not part of the ANGLE
+          # build, so drop it from DEPS before syncing.
+          python3 - "$GPU_DEPS/angle/DEPS" <<'PYDEPS'
+          import re, sys
+          path = sys.argv[1]
+          text = open(path).read()
+          stripped = re.sub(r"\n  'third_party/clang-format/script': \{.*?\n  \},\n", "\n", text, flags=re.S)
+          if stripped == text:
+              print('clang-format entry not found (already removed?)')
+          else:
+              open(path, 'w').write(stripped)
+              print('removed third_party/clang-format/script from DEPS')
+          PYDEPS
           (cd "$GPU_DEPS/angle" && python3 scripts/bootstrap.py)
           # gclient fetches dozens of pinned repos; individual ones fail with
           # transient HTTP 500s often enough to be worth retrying.
