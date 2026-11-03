@@ -49,13 +49,13 @@ body {
     user-select: none;
 }
 
-/* Breathing room around the text grid; the margin shows the theme background. */
+/* Full-bleed grid: edge-to-edge terminal, no margin. */
 #terminal {
     position: absolute;
-    top: 6px;
-    bottom: 2px;
-    left: 10px;
-    right: 6px;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;
     overflow: hidden;
     background: var(--terminal-background);
     color: var(--terminal-foreground);

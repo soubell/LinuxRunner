@@ -369,9 +369,12 @@
         if (!cellHeight)
             return;
         const buffer = term.buffer.active;
-        // Fit rounds rows down; the unused fraction still belongs to UIKit's
-        // viewport. Its maximum offset must equal baseY * cellHeight exactly.
-        const scrollHeight = buffer.baseY * cellHeight + terminalElement.clientHeight;
+        // Report the scrollback height only: UIKit adds its own viewport height
+        // to the content size, so the largest offset is exactly baseY *
+        // cellHeight. Using the DOM clientHeight here instead made the offset
+        // stop short of the last line or run past it into empty space whenever
+        // the web view's viewport differed from its frame.
+        const scrollHeight = buffer.baseY * cellHeight;
         const scrollTop = buffer.viewportY * cellHeight;
 
         if (scrollHeight !== lastNativeScrollHeight) {

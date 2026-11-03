@@ -11,6 +11,8 @@
 #import "UIApplication+OpenURL.h"
 #import "NSObject+SaneKVO.h"
 
+#import <QuartzCore/QuartzCore.h>
+
 #include <math.h>
 
 struct rowcol {
@@ -33,12 +35,22 @@ struct rowcol {
 }
 @end
 
-@interface TerminalView () <UIEditMenuInteractionDelegate>
+@interface TerminalView () <UIEditMenuInteractionDelegate, UIGestureRecognizerDelegate>
 
 @property (nonatomic) NSMutableArray<UIKeyCommand *> *keyCommands;
 @property ScrollbarView *scrollbarView;
 @property (nonatomic) BOOL terminalFocused;
 @property (nonatomic) BOOL updatingTerminalScroll;
+@property (nonatomic) UIPanGestureRecognizer *scrollPanRecognizer;
+@property (nonatomic) CGFloat scrollPanStartOffset;
+@property (nonatomic) CGFloat scrollDecelerationVelocity;
+@property (nonatomic) CADisplayLink *scrollDecelerationLink;
+// Scroll coalescing: UIScrollView can fire -scrollViewDidScroll several times
+// per frame, and each call used to cost a full JS evaluation with a formatted
+// string. Keep the newest offset and flush it once per runloop turn instead.
+@property (nonatomic) CGFloat pendingScrollOffset;
+@property (nonatomic) BOOL pendingScrollOffsetValid;
+@property (nonatomic) BOOL scrollFlushScheduled;
 @property UIEditMenuInteraction *terminalEditMenu API_AVAILABLE(ios(16.0));
 
 @property (nullable) NSString *markedText;
@@ -69,8 +81,24 @@ struct rowcol {
     scrollbarView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     self.clipsToBounds = YES;
     [self addSubview:scrollbarView];
+
+    // WebKit claims the touch sequence for its own recognisers, so the scroll
+    // view's built-in pan never begins: dragging the terminal body did nothing
+    // and only the thin indicator could be scrubbed. Drive the scroll view from
+    // our own pan instead, and let it run alongside WebKit's recognisers.
+    scrollbarView.panGestureRecognizer.enabled = NO;
+    UIPanGestureRecognizer *scrollPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleTerminalPan:)];
+    scrollPan.delegate = self;
+    scrollPan.maximumNumberOfTouches = 1;
+    scrollPan.cancelsTouchesInView = NO;
+    scrollPan.delaysTouchesBegan = NO;
+    [self addGestureRecognizer:scrollPan];
+    self.scrollPanRecognizer = scrollPan;
+
 #if USE_XTERM_RENDERER
     UILongPressGestureRecognizer *selectionGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(selectTerminalText:)];
+    selectionGesture.delegate = self;
+    selectionGesture.cancelsTouchesInView = NO;
     [self addGestureRecognizer:selectionGesture];
     if (@available(iOS 16.0, *)) {
         self.terminalEditMenu = [[UIEditMenuInteraction alloc] initWithDelegate:self];
@@ -108,7 +136,23 @@ struct rowcol {
 
 - (void)dealloc {
     [NSNotificationCenter.defaultCenter removeObserver:self];
+    [self.scrollDecelerationLink invalidate];
     self.terminal = nil;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    // The view now runs edge to edge, but the text must stay clear of the
+    // notch. The bottom is left to run to the edge so the grid is not floating
+    // above the home indicator.
+    UIEdgeInsets insets = self.safeAreaInsets;
+    UIEdgeInsets textInsets = UIEdgeInsetsMake(insets.top, insets.left, 0, insets.right);
+    self.scrollbarView.frame = UIEdgeInsetsInsetRect(self.bounds, textInsets);
+}
+
+- (void)safeAreaInsetsDidChange {
+    [super safeAreaInsetsDidChange];
+    [self setNeedsLayout];
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
@@ -151,6 +195,11 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     webView.scrollView.delaysContentTouches = NO;
     webView.scrollView.canCancelContentTouches = NO;
     webView.scrollView.panGestureRecognizer.enabled = NO;
+    // Keep the page viewport identical to the view frame: WebKit otherwise
+    // insets the page for the safe area, so the script's idea of the visible
+    // height disagreed with UIKit's and the scrollback landed off by that inset.
+    webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    webView.scrollView.contentInset = UIEdgeInsetsZero;
     id <WKScriptMessageHandler> handler = [[WeakScriptMessageHandler alloc] initWithHandler:self];
     for (int i = 0; i < sizeof(HANDLERS)/sizeof(HANDLERS[0]); i++) {
         [webView.configuration.userContentController addScriptMessageHandler:handler name:HANDLERS[i]];
@@ -309,11 +358,15 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     } else if ([message.name isEqualToString:@"newScrollHeight"]) {
         if (![message.body isKindOfClass:NSNumber.class])
             return;
-        CGFloat newHeight = [message.body doubleValue];
-        if (!isfinite(newHeight) || newHeight < 0)
+        // The script reports the scrollback height in points (baseY * cell
+        // height), i.e. the largest offset it can honour. UIKit adds its own
+        // viewport height so the maximum offset lands exactly on the last line
+        // instead of stopping short or leaving a dead zone past the bottom.
+        CGFloat scrollbackHeight = [message.body doubleValue];
+        if (!isfinite(scrollbackHeight) || scrollbackHeight < 0)
             return;
         self.updatingTerminalScroll = YES;
-        self.scrollbarView.contentSize = CGSizeMake(0, newHeight);
+        self.scrollbarView.contentSize = CGSizeMake(0, scrollbackHeight + self.scrollbarView.bounds.size.height);
         self.updatingTerminalScroll = NO;
     } else if ([message.name isEqualToString:@"newScrollTop"]) {
         if (![message.body isKindOfClass:NSNumber.class])
@@ -340,7 +393,113 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     // Terminal output updates the indicator, not the user's scroll position.
     if (self.updatingTerminalScroll)
         return;
-    [self.terminal.webView evaluateJavaScript:[NSString stringWithFormat:@"exports.newScrollTop(%f)", scrollView.contentOffset.y] completionHandler:nil];
+    self.pendingScrollOffset = scrollView.contentOffset.y;
+    self.pendingScrollOffsetValid = YES;
+    if (self.scrollFlushScheduled)
+        return;
+    self.scrollFlushScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.scrollFlushScheduled = NO;
+        [self flushPendingScrollOffset];
+    });
+}
+
+- (void)flushPendingScrollOffset {
+    if (!self.pendingScrollOffsetValid)
+        return;
+    self.pendingScrollOffsetValid = NO;
+    WKWebView *webView = self.terminal.webView;
+    if (webView == nil)
+        return;
+    NSNumber *offset = @(self.pendingScrollOffset);
+    if (@available(iOS 14.0, *)) {
+        // Pass the value as an argument instead of interpolating it into a
+        // script string: no per-frame string formatting and no re-parse.
+        [webView callAsyncJavaScript:@"return exports.newScrollTop(offset);"
+                           arguments:@{@"offset": offset}
+                             inFrame:nil
+                      inContentWorld:WKContentWorld.pageWorld
+                   completionHandler:nil];
+    } else {
+        [webView evaluateJavaScript:[NSString stringWithFormat:@"exports.newScrollTop(%f)", offset.doubleValue]
+                  completionHandler:nil];
+    }
+}
+
+#pragma mark Scroll gestures
+
+- (CGFloat)maximumScrollOffset {
+    return MAX(0, self.scrollbarView.contentSize.height - self.scrollbarView.bounds.size.height);
+}
+
+- (void)handleTerminalPan:(UIPanGestureRecognizer *)pan {
+    UIScrollView *scrollView = self.scrollbarView;
+    if (!self.terminal.loaded || !scrollView.scrollEnabled)
+        return;
+    switch (pan.state) {
+        case UIGestureRecognizerStateBegan:
+            [self stopScrollDeceleration];
+            self.scrollPanStartOffset = scrollView.contentOffset.y;
+            break;
+        case UIGestureRecognizerStateChanged: {
+            CGFloat maxOffset = [self maximumScrollOffset];
+            CGFloat offset = self.scrollPanStartOffset - [pan translationInView:self].y;
+            offset = MAX(0, MIN(maxOffset, offset));
+            if (scrollView.contentOffset.y != offset)
+                scrollView.contentOffset = CGPointMake(0, offset);
+            break;
+        }
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed:
+            [self startScrollDecelerationWithVelocity:-[pan velocityInView:self].y];
+            break;
+        default:
+            break;
+    }
+}
+
+- (void)startScrollDecelerationWithVelocity:(CGFloat)velocity {
+    [self stopScrollDeceleration];
+    if (fabs(velocity) < 80)
+        return;
+    self.scrollDecelerationVelocity = velocity;
+    CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(stepScrollDeceleration:)];
+    [link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    self.scrollDecelerationLink = link;
+}
+
+- (void)stepScrollDeceleration:(CADisplayLink *)link {
+    NSTimeInterval dt = link.targetTimestamp - link.timestamp;
+    if (!(dt > 0) || dt > 0.1)
+        dt = 1.0 / 60.0;
+    // UIScrollView's normal deceleration curve: v(t) = v0 * 0.998^(t in ms).
+    self.scrollDecelerationVelocity *= pow(0.998, dt * 1000.0);
+    CGFloat maxOffset = [self maximumScrollOffset];
+    CGFloat offset = self.scrollbarView.contentOffset.y + self.scrollDecelerationVelocity * dt;
+    if (fabs(self.scrollDecelerationVelocity) < 8 || offset <= 0 || offset >= maxOffset) {
+        offset = MAX(0, MIN(maxOffset, offset));
+        self.scrollbarView.contentOffset = CGPointMake(0, offset);
+        [self stopScrollDeceleration];
+        return;
+    }
+    self.scrollbarView.contentOffset = CGPointMake(0, offset);
+}
+
+- (void)stopScrollDeceleration {
+    [self.scrollDecelerationLink invalidate];
+    self.scrollDecelerationLink = nil;
+    self.scrollDecelerationVelocity = 0;
+}
+
+#pragma mark UIGestureRecognizerDelegate
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    // WebKit's touch-events recogniser claims every touch sequence inside the
+    // web view. Without simultaneous recognition neither the scroll pan nor the
+    // selection long press ever leaves the Possible state.
+    return YES;
 }
 
 - (void)setKeyboardAppearance:(UIKeyboardAppearance)keyboardAppearance {
