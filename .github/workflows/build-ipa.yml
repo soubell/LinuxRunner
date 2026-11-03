@@ -1,0 +1,62 @@
+name: Build IPA
+
+# CI only. This workflow lives on the fork's main branch and is not part of the
+# app change, so the feature branch diff stays minimal.
+#
+#   gh workflow run build-ipa.yml -R <owner>/LinuxRunner --ref main -f target=<branch>
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Branch or tag to build
+        required: true
+        default: terminal-smoother
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target }}
+
+      - name: Checkout pinned submodules
+        run: |
+          git submodule update --init --recursive --checkout -- \
+            deps/libapps deps/libarchive deps/glslang deps/spirv-cross
+
+      - name: Install build tools
+        run: |
+          # scripts/bootstrap-macos.sh requires: meson ninja cmake ld.lld
+          brew install meson ninja cmake pkg-config lld
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+          echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Build unsigned IPA
+        run: scripts/build-ipa.sh --unsigned
+
+      - name: Verify IPA
+        run: python3 scripts/verify-ipa.py build/releases
+
+      # Release assets are served as plain files; artifacts are always zipped.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: build-${{ github.run_number }}
+        run: |
+          SHA=$(git rev-parse HEAD)
+          gh release create "$TAG" \
+            --target "$SHA" \
+            --title "LinuxRunner build ${{ github.run_number }} (${{ inputs.target }})" \
+            --notes "Unsigned IPA built from \`${{ inputs.target }}\` at $SHA.
+
+          Source (GPL-3.0): https://github.com/${{ github.repository }}/tree/$SHA" \
+            build/releases/LinuxRunner.ipa \
+            build/releases/LinuxRunner.ipa.sha256
+          echo "Download: https://github.com/${{ github.repository }}/releases/download/$TAG/LinuxRunner.ipa" >> "$GITHUB_STEP_SUMMARY"
