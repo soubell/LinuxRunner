@@ -12,13 +12,23 @@ on:
         description: Branch or tag to build
         required: true
         default: terminal-smoother
+      metal:
+        description: Build the Metal/JIT variant (slow, cached afterwards)
+        type: boolean
+        default: true
 
 jobs:
   build:
     runs-on: xcode-27
-    timeout-minutes: 120
+    timeout-minutes: 300
     permissions:
       contents: write
+    env:
+      # Pinned upstream revisions for the GPU dependencies (docs/BUILDING.md).
+      ANGLE_REV: feebf60fe088ccec3a26a7419d6ac68edf542c7a
+      VIRGL_REV: e0a1caf3b147bb26dfe524dbb85ded1177e7e49e
+      EPOXY_REV: d1f952c4565c389d82fd1657153e84e050f35b27
+      DEPOT_TOOLS_REV: a20039648c0de69d8156906b18052bd47e9bf230
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,8 +48,41 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
+      # The static ANGLE/libepoxy/virglrenderer archives take a long time to
+      # build and never change for a given revision set, so keep them.
+      - name: Restore GPU libraries
+        id: gpu-cache
+        if: inputs.metal
+        uses: actions/cache@v4
+        with:
+          path: build/gpu/iphoneos
+          key: gpu-iphoneos-angle-${{ env.ANGLE_REV }}-virgl-${{ env.VIRGL_REV }}-epoxy-${{ env.EPOXY_REV }}
+
+      - name: Build GPU dependencies (Metal)
+        if: inputs.metal && steps.gpu-cache.outputs.cache-hit != 'true'
+        env:
+          GPU_DEPS: ${{ runner.temp }}/gpu-deps
+        run: |
+          set -euo pipefail
+          fetch() { # url, dir, revision
+            mkdir -p "$2"
+            git -C "$2" init -q
+            git -C "$2" remote add origin "$1" 2>/dev/null || git -C "$2" remote set-url origin "$1"
+            git -C "$2" fetch -q --depth 1 origin "$3"
+            git -C "$2" checkout -q --detach FETCH_HEAD
+          }
+          fetch https://chromium.googlesource.com/chromium/tools/depot_tools.git "$GPU_DEPS/depot_tools" "$DEPOT_TOOLS_REV"
+          fetch https://chromium.googlesource.com/angle/angle "$GPU_DEPS/angle" "$ANGLE_REV"
+          fetch https://gitlab.freedesktop.org/virgl/virglrenderer.git "$GPU_DEPS/virglrenderer" "$VIRGL_REV"
+          fetch https://github.com/anholt/libepoxy.git "$GPU_DEPS/libepoxy" "$EPOXY_REV"
+          export PATH="$GPU_DEPS/depot_tools:$PATH"
+          (cd "$GPU_DEPS/angle" && python3 scripts/bootstrap.py && gclient sync --no-history)
+          scripts/build-gpu-deps.sh iphoneos
+
       - name: Build unsigned IPA
-        run: scripts/build-ipa.sh --unsigned
+        env:
+          VIRGL: ${{ inputs.metal && 'YES' || 'NO' }}
+        run: LINUXRUNNER_VIRGL="$VIRGL" LINUXRUNNER_JIT="$VIRGL" scripts/build-ipa.sh --unsigned
 
       - name: Verify IPA
         run: python3 scripts/verify-ipa.py build/releases
@@ -53,8 +96,9 @@ jobs:
           SHA=$(git rev-parse HEAD)
           gh release create "$TAG" \
             --target "$SHA" \
-            --title "LinuxRunner build ${{ github.run_number }} (${{ inputs.target }})" \
+            --title "LinuxRunner build ${{ github.run_number }} (${{ inputs.target }})${{ inputs.metal && ' · Metal' || '' }}" \
             --notes "Unsigned IPA built from \`${{ inputs.target }}\` at $SHA.
+          Metal/JIT: ${{ inputs.metal }}
 
           Source (GPL-3.0): https://github.com/${{ github.repository }}/tree/$SHA" \
             build/releases/LinuxRunner.ipa \
