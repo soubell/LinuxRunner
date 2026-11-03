@@ -109,7 +109,12 @@ jobs:
             if [ "$attempt" = 4 ]; then exit 1; fi
           done
           df -h /
-          bash -x scripts/build-gpu-deps.sh iphoneos
+          # Capture everything: a failing meson setup printed nothing useful.
+          set +e
+          bash -x scripts/build-gpu-deps.sh iphoneos > "$RUNNER_TEMP/gpu-build.log" 2>&1
+          status=$?
+          tail -120 "$RUNNER_TEMP/gpu-build.log"
+          exit $status
 
       - name: Build unsigned IPA
         env:
